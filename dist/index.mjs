@@ -302,10 +302,38 @@ class XMeowAdapterService extends EventEmitter {
   emitStatus() { this.emit('status', this.getStatus()); }
 }
 
+function extractAssistantText(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (typeof content === 'object') {
+    const parts = content.parts ?? content.content;
+    if (Array.isArray(parts)) {
+      return parts.map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object') {
+          if (part.thought) return '';
+          if (typeof part.text === 'string') return part.text;
+        }
+        return '';
+      }).join('');
+    }
+    if (typeof content.text === 'string') return content.text;
+  }
+  return '';
+}
+
 function wireBackendEvents(api, adapter, getConfig) {
   const backend = api.backend;
-  const onResponse = (sessionId, text) => { const config = getConfig(); if (sessionId !== config.session.id) return; adapter.publish(makeChatResponse(text, sessionId)); };
-  const onError = (sessionId, message) => { const config = getConfig(); if (sessionId !== config.session.id) return; adapter.publish(makeGenericNotice(message, { source: 'backend.error', session_id: sessionId })); };
+  const pendingBySession = new Map();
+  const publishChatResponse = (sessionId, text) => {
+    const trimmed = (text ?? '').trim();
+    if (!trimmed) return;
+    adapter.publish(makeChatResponse(trimmed, sessionId));
+  };
+  const onResponse = (sessionId, text) => { const config = getConfig(); if (sessionId !== config.session.id) return; pendingBySession.delete(sessionId); publishChatResponse(sessionId, typeof text === 'string' ? text : extractAssistantText(text)); };
+  const onAssistantContent = (sessionId, content) => { const config = getConfig(); if (sessionId !== config.session.id) return; const text = extractAssistantText(content); if (text.trim()) pendingBySession.set(sessionId, text); };
+  const onDone = (sessionId) => { const config = getConfig(); if (sessionId !== config.session.id) return; const text = pendingBySession.get(sessionId); pendingBySession.delete(sessionId); if (text) publishChatResponse(sessionId, text); };
+  const onError = (sessionId, message) => { const config = getConfig(); if (sessionId !== config.session.id) return; pendingBySession.delete(sessionId); const text = message instanceof Error ? message.message : String(message ?? 'unknown error'); adapter.publish(makeGenericNotice(text, { source: 'backend.error', session_id: sessionId })); };
   const onAgentNotification = (sessionId, taskId, status, summary, taskType, silent) => {
     const event = mapAgentNotification({ sessionId, taskId, status, summary, taskType, silent }, getConfig());
     if (event) adapter.publish(event);
@@ -315,10 +343,12 @@ function wireBackendEvents(api, adapter, getConfig) {
     if (event) adapter.publish(event);
   };
   backend.on('response', onResponse);
+  backend.on('assistant:content', onAssistantContent);
+  backend.on('done', onDone);
   backend.on('error', onError);
   backend.on('agent:notification', onAgentNotification);
   backend.on('task:result', onTaskResult);
-  return { dispose() { backend.off('response', onResponse); backend.off('error', onError); backend.off('agent:notification', onAgentNotification); backend.off('task:result', onTaskResult); } };
+  return { dispose() { backend.off('response', onResponse); backend.off('assistant:content', onAssistantContent); backend.off('done', onDone); backend.off('error', onError); backend.off('agent:notification', onAgentNotification); backend.off('task:result', onTaskResult); } };
 }
 
 function registerStatusRoute(api, adapter, getConfig) {
@@ -466,7 +496,24 @@ class XMeowWebSocketEndpoint {
   broadcast(value) { for (const client of this.clients) client.sendJSON(value); }
 }
 
+// The Iris runtime is Bun, whose node:http 'upgrade' event does not flush raw
+// socket.write() bytes to the client (the write is accepted but nothing is sent),
+// so a manual WebSocket handshake hangs and the client times out. Under Bun we
+// use native Bun.serve() WebSocket support; under Node we keep the portable
+// node:http path (also used by the offline harness). Runtime is detected at call
+// time so this single dist works in both environments.
+function getBunRuntime() {
+  const bun = globalThis.Bun;
+  return bun && typeof bun.serve === 'function' ? bun : undefined;
+}
+
 async function startStandaloneServer(adapter, options) {
+  const bun = getBunRuntime();
+  if (bun) return startStandaloneServerBun(adapter, options, bun);
+  return startStandaloneServerNode(adapter, options);
+}
+
+async function startStandaloneServerNode(adapter, options) {
   const config = options.getConfig();
   const endpoint = new XMeowWebSocketEndpoint(adapter, { path: '/ws/xmeow', getConfig: options.getConfig, logger: options.logger });
   const server = http.createServer((req, res) => {
@@ -487,6 +534,62 @@ async function startStandaloneServer(adapter, options) {
   adapter.setLifecycle({ standaloneServer: 'listening' });
   return { dispose() { endpoint.close(); server.close(); adapter.setLifecycle({ standaloneServer: 'disabled' }); } };
 }
+
+async function startStandaloneServerBun(adapter, options, bun) {
+  const config = options.getConfig();
+  const path = '/ws/xmeow';
+  const clients = new Set();
+  const broadcast = (value) => { const text = JSON.stringify(value); for (const ws of clients) { try { ws.send(text); } catch { /* client gone */ } } };
+  const disposables = [adapter.onEnvelope((event) => broadcast(event)), adapter.onStatus((status) => broadcast(status))];
+  const authorize = (req, srv) => {
+    const url = new URL(req.url);
+    const remoteAddress = srv.requestIP?.(req)?.address ?? '';
+    const nodeLike = { headers: { authorization: req.headers.get('authorization') ?? undefined, host: req.headers.get('host') ?? url.host }, url: `${url.pathname}${url.search}`, socket: { remoteAddress } };
+    return isAuthorized(nodeLike, options.getConfig());
+  };
+  const jsonResponse = (status, data) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+  let server;
+  try {
+    server = bun.serve({
+      port: config.transport.standalone.port,
+      hostname: config.transport.standalone.host,
+      fetch(req, srv) {
+        const url = new URL(req.url);
+        if (url.pathname === path) {
+          if (!authorize(req, srv)) return jsonResponse(401, { error: 'Unauthorized' });
+          if (srv.upgrade(req, { data: {} })) return undefined;
+          return jsonResponse(426, { error: 'Upgrade Required' });
+        }
+        if (req.method === 'GET' && url.pathname === '/api/xmeow/status') {
+          if (!authorize(req, srv)) return jsonResponse(401, { error: 'Unauthorized' });
+          return jsonResponse(200, adapter.getStatus());
+        }
+        return jsonResponse(404, { error: 'Not found' });
+      },
+      websocket: {
+        open(ws) { clients.add(ws); adapter.markClientCount(clients.size); try { ws.send(JSON.stringify(adapter.getStatus())); } catch { /* client gone */ } },
+        async message(ws, message) { const text = typeof message === 'string' ? message : Buffer.from(message).toString('utf8'); const response = await adapter.handleClientMessage(text); if (response) { try { ws.send(JSON.stringify(response)); } catch { /* client gone */ } } },
+        close(ws) { clients.delete(ws); adapter.markClientCount(clients.size); },
+      },
+    });
+  } catch (error) {
+    for (const disposable of disposables.splice(0)) disposable.dispose();
+    throw error;
+  }
+  options.logger?.info?.(`XMeow standalone endpoint (Bun) listening on http://${config.transport.standalone.host}:${config.transport.standalone.port}`);
+  adapter.setLifecycle({ standaloneServer: 'listening' });
+  return {
+    dispose() {
+      for (const ws of [...clients]) { try { ws.close(1001, 'xmeow endpoint closed'); } catch { /* ignore */ } }
+      clients.clear();
+      for (const disposable of disposables.splice(0)) disposable.dispose();
+      adapter.markClientCount(0);
+      try { server.stop(true); } catch { /* ignore */ }
+      adapter.setLifecycle({ standaloneServer: 'disabled' });
+    },
+  };
+}
+
 
 function installWebPlatformBridge(options) {
   const platform = options.platform;

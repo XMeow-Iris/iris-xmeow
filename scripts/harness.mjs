@@ -97,6 +97,14 @@ function nextWebSocketJSON(ws) {
   });
 }
 
+function collectWebSocketJSON(ws, ms) {
+  const out = [];
+  ws.addEventListener('message', (event) => {
+    try { out.push(JSON.parse(event.data)); } catch { /* ignore */ }
+  });
+  return new Promise((resolve) => setTimeout(() => resolve(out), ms));
+}
+
 function makeRes() {
   return {
     status: undefined,
@@ -209,6 +217,58 @@ test('publishes only configured XMeow chat responses into status', async () => {
   await route.handler(makeReq({ remoteAddress: '127.0.0.1' }), res, {});
   const json = res.json();
   assert(json.message === '咪已经收到啦。', `unexpected latest message: ${json.message}`);
+  plugin.deactivate(harness.ctx);
+});
+
+test('surfaces streaming replies via assistant:content flushed on done', async () => {
+  const port = await getFreePort();
+  const { api, harness } = await activate({
+    session: { id: 'xmeow-bar' },
+    transport: { mode: 'standalone', standalone: { enabled: true, host: '127.0.0.1', port } },
+  });
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/xmeow`);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', () => reject(new Error('websocket error')), { once: true });
+  });
+
+  const collected = collectWebSocketJSON(ws, 400);
+  // Streaming turn: Iris does NOT emit `response`; it emits one `assistant:content`
+  // per model message (reasoning/thought parts must be ignored) and closes with `done`.
+  api.backend.emit('assistant:content', 'other-session', { role: 'model', parts: [{ text: 'wrong channel' }] });
+  api.backend.emit('assistant:content', 'xmeow-bar', { role: 'model', parts: [{ text: '中间稿' }] });
+  api.backend.emit('assistant:content', 'xmeow-bar', { role: 'model', parts: [{ text: '想一下', thought: true }, { text: '尾巴缠上来了。' }] });
+  api.backend.emit('done', 'xmeow-bar', 1234, 'turn-1');
+  const frames = await collected;
+
+  const chatResponses = frames.filter((f) => f.type === 'chat_response');
+  assert(chatResponses.length === 1, `expected exactly one chat_response, got ${chatResponses.length}: ${JSON.stringify(chatResponses)}`);
+  assert(chatResponses[0].text === '尾巴缠上来了。', `unexpected streamed reply: ${chatResponses[0].text}`);
+
+  ws.close();
+  plugin.deactivate(harness.ctx);
+});
+
+test('flushes nothing on done when the turn produced no visible text', async () => {
+  const port = await getFreePort();
+  const { api, harness } = await activate({
+    session: { id: 'xmeow-bar' },
+    transport: { mode: 'standalone', standalone: { enabled: true, host: '127.0.0.1', port } },
+  });
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/xmeow`);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', () => reject(new Error('websocket error')), { once: true });
+  });
+  const collected = collectWebSocketJSON(ws, 300);
+  // Tool-only model message (no text) then done -> no chat_response.
+  api.backend.emit('assistant:content', 'xmeow-bar', { role: 'model', parts: [{ functionCall: { name: 'noop' } }] });
+  api.backend.emit('done', 'xmeow-bar', 10, 'turn-2');
+  const frames = await collected;
+  const chatResponses = frames.filter((f) => f.type === 'chat_response');
+  assert(chatResponses.length === 0, `expected no chat_response, got ${chatResponses.length}`);
+  ws.close();
   plugin.deactivate(harness.ctx);
 });
 

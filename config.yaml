@@ -1,0 +1,57 @@
+# XMeow Bar Iris adapter defaults.
+# Copy values into ~/.iris/configs/xmeow.yaml or the active Agent config dir.
+xmeow:
+  enabled: true
+
+  # XMeow is a projection of Iris, not a second Agent.
+  session:
+    id: xmeow-bar
+    platform: xmeow-bar
+    # Optional. Kept for future multi-agent routing metadata; the active Iris backend
+    # is still supplied by the host lifecycle.
+    agentName: null
+
+  auth:
+    # Recommended when the Iris web host is reachable outside a private Tailscale network.
+    # The Swift app can pass it as Authorization: Bearer <token> or ?token=<token>.
+    bearerToken: ""
+    requireToken: false
+    allowMissingTokenOnLoopback: true
+
+  transport:
+    # auto: prefer Iris WebPlatform /ws/xmeow when web platform exists; otherwise use
+    # standalone only if standalone.enabled=true.
+    # web-platform: require the Iris WebPlatform bridge.
+    # standalone: run a small extension-owned HTTP/WS server.
+    # off: only register the status route/service; no websocket endpoint.
+    mode: auto
+    webPlatform:
+      enabled: true
+      # Iris currently has public HTTP route registration but no public WS-upgrade
+      # registration. This private bridge is isolated and fail-closed.
+      allowPrivateUpgradeBridge: true
+    standalone:
+      enabled: false
+      host: 127.0.0.1
+      port: 8193
+
+  presence:
+    mood: calm
+    earDirection: relaxed
+    defaultMessage: "咪在菜单栏边缘打盹。"
+    staleAfterSeconds: 7200
+
+  events:
+    # Chat responses are intentionally limited to the configured XMeow session.
+    # Task/cron-style signals can be accepted from all sessions by leaving this empty.
+    acceptedTaskSessionIds: []
+    includeSilentTaskResults: true
+    mappings:
+      qdii_report:
+        keywords: ["qdii", "QDII", "溢价", "纳指", "ETF", "日报"]
+      random_wake:
+        keywords: ["random_wake", "随机唤醒", "virtual-lover", "proactive", "主动消息", "找你"]
+      honey_mail:
+        keywords: ["honey_mail", "蜜语", "邮件", "mail"]
+      diary_completed:
+        keywords: ["diary", "日记", "凌晨日记"]

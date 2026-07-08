@@ -1,0 +1,13 @@
+{
+  "name": "@iris-extension/xmeow-bar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../script/prepare-extension-sdk.mjs && bun build ./src/index.ts --outfile ./dist/index.mjs --target=node --format=esm --packages=bundle",
+    "check:dist": "node --check ./dist/index.mjs",
+    "harness": "node --check ./dist/index.mjs && node ./scripts/harness.mjs"
+  },
+  "dependencies": {
+    "irises-extension-sdk": "file:../../packages/extension-sdk"
+  }
+}

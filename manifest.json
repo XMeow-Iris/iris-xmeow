@@ -1,0 +1,19 @@
+{
+  "name": "xmeow-bar",
+  "version": "0.2.0",
+  "description": "XMeow Bar Iris adapter: stable /api/xmeow/status and /ws/xmeow companion endpoints",
+  "plugin": {
+    "entry": "dist/index.mjs"
+  },
+  "distribution": {
+    "files": [
+      "README.md",
+      "config.yaml",
+      "dist/index.mjs",
+      "docs/protocol-v1.md",
+      "package.json",
+      "HARNESS.md",
+      "scripts/harness.mjs"
+    ]
+  }
+}

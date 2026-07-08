@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist-types",
+    "declaration": true,
+    "declarationMap": false,
+    "noEmit": false,
+    "baseUrl": "../..",
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "irises-extension-sdk": [
+        "packages/extension-sdk/dist/index.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": []
+}
